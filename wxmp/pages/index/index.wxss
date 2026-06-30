@@ -1,0 +1,156 @@
+/* pages/index/index.wxss — split-screen layout. */
+
+.page {
+  position: relative;
+  height: 100vh;
+  width: 100vw;
+  /* No page-level scroll. The map is fixed at the top (see below)
+     and the chat area scrolls internally. */
+  overflow: hidden;
+}
+
+.map-wrap {
+  /* `position: fixed` so the <map> component is NOT affected by
+     the page being pushed up when the keyboard opens. Without this,
+     WeChat re-initializes the map's canvas whenever its viewport
+     shifts, which manifests as a visible "flash / reload" the moment
+     the user focuses the textarea. */
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 60vh;
+  z-index: 1;
+  background: #0b1220;
+}
+.map {
+  width: 100%;
+  height: 100%;
+}
+.info-banner {
+  position: absolute;
+  top: 24rpx;
+  left: 24rpx;
+  right: 24rpx;
+  background: rgba(15, 23, 42, 0.92);
+  border-radius: 16rpx;
+  padding: 20rpx;
+  color: #e2e8f0;
+  z-index: 10;
+  box-shadow: 0 4rpx 24rpx rgba(0,0,0,0.3);
+}
+.info-title {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #93c5fd;
+  margin-bottom: 8rpx;
+}
+.info-body {
+  font-size: 24rpx;
+  color: #cbd5e1;
+  max-height: 320rpx;
+  overflow-y: auto;
+}
+.info-close {
+  position: absolute;
+  top: 16rpx;
+  right: 24rpx;
+  color: #94a3b8;
+  font-size: 28rpx;
+  padding: 8rpx 16rpx;
+}
+
+.chat-wrap {
+  /* Absolutely positioned below the fixed map so the input area
+     floats above the keyboard when the user focuses the textarea,
+     without dragging the map along. */
+  position: absolute;
+  top: 60vh;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0f172a;
+  border-top: 1rpx solid rgba(255, 255, 255, 0.05);
+}
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  padding: 12rpx 24rpx;
+  background: #1e293b;
+  border-bottom: 1rpx solid rgba(255,255,255,0.04);
+  font-size: 22rpx;
+  color: #94a3b8;
+}
+.status-text { color: #cbd5e1; }
+
+.messages {
+  flex: 1;
+  min-height: 0;  /* required so flex child can shrink and scroll */
+  padding: 20rpx 24rpx;
+  overflow-y: auto;
+}
+
+.msg {
+  display: flex;
+  margin-bottom: 16rpx;
+}
+.msg-user { justify-content: flex-end; }
+.msg-assistant { justify-content: flex-start; flex-direction: column; align-items: flex-start; }
+
+.error-bubble {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1rpx solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  padding: 12rpx 18rpx;
+  border-radius: 12rpx;
+  font-size: 24rpx;
+}
+
+.input-bar {
+  display: flex;
+  gap: 12rpx;
+  /* Less top padding + more bottom padding lifts the input away
+     from the device's bottom edge / home-indicator area, and
+     matches the WeChat chat bar's vertical breathing room. */
+  padding: 8rpx 16rpx 28rpx;
+  background: #1e293b;
+  border-top: 1rpx solid rgba(255, 255, 255, 0.05);
+  /* flex-end (not center) so the input keeps a stable bottom
+     edge when the keyboard pushes the page up. `center` causes
+     a visible re-center jiggle on every cursor blink. */
+  align-items: flex-end;
+}
+.input {
+  flex: 1;
+  background: #0b1220;
+  border: 1rpx solid rgba(255, 255, 255, 0.1);
+  border-radius: 14rpx;
+  padding: 0 18rpx;
+  color: #e2e8f0;
+  font-size: 28rpx;
+  height: 56rpx;
+  line-height: 56rpx;
+  box-sizing: border-box;
+}
+.send-btn {
+  flex-shrink: 0;
+  height: 56rpx;
+  padding: 0 20rpx;
+  background: #1677ff;
+  color: #ffffff;
+  border: none;
+  border-radius: 6rpx;
+  font-size: 26rpx;
+  line-height: 56rpx;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+.send-btn.sending {
+  background: #ef4444;
+}

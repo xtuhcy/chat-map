@@ -1,0 +1,14 @@
+# Local secrets — NEVER commit.
+.env
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+*.egg-info/
+
+# Local dev artefacts
+.venv/
+.idea/
+.vscode/
+*.log
+.DS_Store

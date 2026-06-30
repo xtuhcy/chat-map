@@ -1,0 +1,82 @@
+<view class="page">
+  <!-- Top half: AMap map rendered via wxmp's native <map> component. -->
+  <view class="map-wrap">
+    <map
+      id="map"
+      class="map"
+      longitude="{{longitude}}"
+      latitude="{{latitude}}"
+      scale="{{scale}}"
+      markers="{{markers}}"
+      polyline="{{polylines}}"
+      polygons="{{polygons}}"
+      circles="{{circles}}"
+      show-location="{{showLocation}}"
+      enable-zoom="{{true}}"
+      enable-scroll="{{true}}"
+      bindmarkertap="onMarkerTap"
+    ></map>
+    <!-- Floating info-window banner (rendered as a top overlay
+         because wxmp <map> has no native HTML info window like
+         the browser AMap SDK). -->
+    <view wx:if="{{infoWindow}}" class="info-banner">
+      <view class="info-title">{{infoWindow.title}}</view>
+      <rich-text class="info-body" nodes="{{infoWindow.html}}"></rich-text>
+      <view class="info-close" bindtap="onInfoClose">✕</view>
+    </view>
+  </view>
+
+  <!-- Bottom half: chat panel. -->
+  <view class="chat-wrap">
+    <view class="status-bar">
+      <view class="dot dot-{{status}}"></view>
+      <text class="status-text">{{statusText}}</text>
+    </view>
+
+    <scroll-view
+      class="messages"
+      scroll-y
+      scroll-into-view="{{scrollIntoView}}"
+      scroll-with-animation
+    >
+      <block wx:for="{{messages}}" wx:key="id" wx:for-item="msg">
+        <view id="msg-{{msg.id}}" class="msg msg-{{msg.role}}">
+          <view wx:if="{{msg.kind === 'text'}}" class="bubble">{{msg.text}}</view>
+          <view wx:elif="{{msg.kind === 'thinking'}}" class="thinking">{{msg.text}}</view>
+          <view wx:elif="{{msg.kind === 'error'}}" class="error-bubble">{{msg.text}}</view>
+          <view wx:elif="{{msg.kind === 'tool'}}" class="tool-card {{msg.expanded ? 'expanded' : 'collapsed'}}">
+            <view class="tool-header" bindtap="onToolTap" data-id="{{msg.id}}">
+              <text class="tool-toggle">{{msg.expanded ? '▼' : '▶'}}</text>
+              <text class="tool-name">{{msg.toolName}}</text>
+              <text class="tool-state">{{msg.toolStateIcon}}</text>
+            </view>
+            <view wx:if="{{msg.expanded}}" class="tool-body">
+              <view class="tool-args">{{msg.toolArgs}}</view>
+              <view class="tool-result">{{msg.toolResult}}</view>
+            </view>
+          </view>
+        </view>
+      </block>
+    </scroll-view>
+
+    <view class="input-bar">
+      <input
+        id="chat-input"
+        class="input"
+        type="text"
+        bindconfirm="onSend"
+        bindblur="onInputBlur"
+        placeholder="问问地图..."
+        maxlength="500"
+        confirm-type="send"
+      />
+      <view
+        class="send-btn {{sending ? 'sending' : ''}}"
+        bindtap="onSend"
+        role="button"
+      >
+        <text>{{sending ? '停止' : '发送'}}</text>
+      </view>
+    </view>
+  </view>
+</view>

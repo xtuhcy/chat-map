@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chat Map</title>
+    <link rel="stylesheet" href="/static/chat.css" />
+    <script src="/static/vendor/marked.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Left: the map (rendered from /map, no inline keys) -->
+        <section id="map-pane" aria-label="map">
+            <iframe id="map-frame" src="/map" title="Map"></iframe>
+        </section>
+
+        <!-- Right: chat panel -->
+        <section id="chat-pane" aria-label="chat">
+            <header id="chat-header">
+                <h1>Chat Map</h1>
+                <div id="status">
+                    <span id="status-dot" class="dot dot-off" title="未连接"></span>
+                    <span id="status-text">未连接</span>
+                </div>
+                <button id="clear-btn" type="button" title="清空对话">清空</button>
+            </header>
+
+            <main id="messages" role="log" aria-live="polite"></main>
+
+            <footer id="composer">
+                <textarea
+                    id="input"
+                    rows="2"
+                    placeholder="说一句试试：「帮我找一下上海迪士尼」「从天安门到故宫怎么走」"
+                    aria-label="message"
+                ></textarea>
+                <button id="send-btn" type="button" disabled>发送</button>
+            </footer>
+        </section>
+    </div>
+
+    <script src="/static/chat.js" type="module"></script>
+</body>
+</html>

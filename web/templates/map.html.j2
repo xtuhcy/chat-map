@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AMap · Chat Map</title>
+
+    <!-- Server-injected config. We expose the AMap key + browser-side
+         WS endpoint as window globals so the static JS file (which
+         doesn't have template access) can pick them up. -->
+    <script>
+        window.__CHAT_MAP_CONFIG__ = {
+            amapKey: {{ amap_key | tojson }},
+            amapSecurityCode: {{ amap_security_code | tojson }},
+            browserUseWs: {{ (ws_scheme ~ "://" ~ ws_host ~ "/ws/browser") | tojson }},
+            userToken: {{ user_token | tojson }},
+        };
+    </script>
+
+    <!-- 1. Security code (must be set BEFORE the maps.js script) -->
+    <script>
+        window._AMapSecurityConfig = {
+            securityJsCode: window.__CHAT_MAP_CONFIG__.amapSecurityCode,
+        };
+    </script>
+
+    <!-- 2. AMap JS API v2 — key rendered server-side via Jinja.
+         Do NOT try to build the URL with JS string concat inside the
+         `src` attribute — the browser reads the src as a literal at
+         parse time and never executes the JS, so AMap would never
+         load and `new AMap.Map(...)` would throw. -->
+    <script
+        src="https://webapi.amap.com/maps?v=2.0&key={{ amap_key|urlencode }}&plugin=AMap.Scale,AMap.ToolBar,AMap.MapType,AMap.PlaceSearch,AMap.Geolocation,AMap.Geocoder,AMap.Polyline,AMap.Polygon,AMap.Circle,AMap.Driving,AMap.Walking,AMap.Riding,AMap.Transfer,AMap.DistrictSearch,AMap.GeometryUtil"
+    ></script>
+
+    <style>
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: #1a1a2e; background: #f0f2f5; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
+        #info { flex: 0 0 auto; padding: 6px 12px; background: #fff7e6; border-bottom: 1px solid #ffe0a3; font-size: 12px; color: #874d00; min-height: 18px; }
+        #map { flex: 1 1 auto; min-height: 0; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="info">地图就绪。所有操作请在右侧聊天框中与 LLM 交互。</div>
+        <div id="map"></div>
+    </div>
+
+    <script>
+        (function () {
+            "use strict";
+
+            const DEFAULT_CENTER = [116.397428, 39.90923];
+            const DEFAULT_ZOOM = 11;
+
+            const map = new AMap.Map("map", {
+                zoom: DEFAULT_ZOOM,
+                center: DEFAULT_CENTER,
+                viewMode: "2D",
+                resizeEnable: true,
+            });
+            map.addControl(new AMap.Scale());
+            map.addControl(new AMap.ToolBar({ position: "RB" }));
+            map.addControl(new AMap.MapType({ defaultType: 0, showRoad: true }));
+
+            const infoEl = document.getElementById("info");
+            const setInfo = (msg) => { infoEl.textContent = msg; };
+
+            const markerLayer = new AMap.OverlayGroup([]);
+            map.add(markerLayer);
+
+            const addMarker = (lnglat, title) => {
+                const m = new AMap.Marker({
+                    position: lnglat, title: title || "",
+                    offset: new AMap.Pixel(-13, -30),
+                });
+                markerLayer.addOverlay(m);
+                return m;
+            };
+
+            const placeSearch = new AMap.PlaceSearch({
+                pageSize: 10, pageIndex: 1, city: "全国", autoFitView: true,
+            });
+
+            // Geolocation — still constructed so the map_locate tool can call
+            // .getCurrentPosition(), but its on-screen button is NOT registered:
+            // this page is chat-driven, not button-driven.
+            const geolocation = typeof AMap.Geolocation !== "undefined"
+                ? new AMap.Geolocation({ enableHighAccuracy: true, timeout: 10000, buttonPosition: "RB", buttonOffset: new AMap.Pixel(10, 20), zoomToAccuracy: true })
+                : null;
+            if (geolocation) {
+                geolocation.on("complete", (data) => {
+                    const { lng, lat } = data.position;
+                    addMarker([lng, lat], "我的位置");
+                    setInfo(`定位成功：${data.formattedAddress || ""} @ ${lng.toFixed(5)}, ${lat.toFixed(5)}`);
+                });
+                geolocation.on("error", (err) => {
+                    setInfo(`定位失败：${err.info || err.message || "未知错误"}`);
+                });
+            }
+
+            // ---- Overlays management (for the MCP map_* tools) ----
+            const __overlays = { polyline: [], polygon: [], circle: [] };
+            let __infoWindow = null;
+            let __geocoder = null;
+
+            function toLngLatArray(path) {
+                return path.map((p) => {
+                    if (Array.isArray(p)) return [Number(p[0]), Number(p[1])];
+                    if (p && typeof p.lng === "number") return [p.lng, p.lat];
+                    if (p && typeof p.longitude === "number") return [p.longitude, p.latitude];
+                    if (p && typeof p.getLng === "function") return [p.getLng(), p.getLat()];
+                    throw new Error("Invalid path point: " + JSON.stringify(p));
+                });
+            }
+            function escapeHtml(s) {
+                return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+            }
+
+            const __helpers = {
+                // ===== 基础图形 =====
+
+                addPolyline(path, opts = {}) {
+                    const line = new AMap.Polyline({
+                        path: toLngLatArray(path),
+                        strokeColor: opts.color || "#1890ff",
+                        strokeWeight: opts.width || 6,
+                        strokeOpacity: opts.opacity ?? 0.9,
+                        showDir: opts.showDir !== false,
+                        lineJoin: "round", lineCap: "round", ...opts,
+                    });
+                    line.setMap(map);
+                    __overlays.polyline.push(line);
+                    return { index: __overlays.polyline.length - 1, count: __overlays.polyline.length };
+                },
+
+                addPolygon(path, opts = {}) {
+                    const poly = new AMap.Polygon({
+                        path: toLngLatArray(path),
+                        strokeColor: opts.color || "#722ed1",
+                        strokeWeight: opts.width || 2,
+                        fillColor: opts.fillColor || "#722ed1",
+                        fillOpacity: opts.fillOpacity ?? 0.2, ...opts,
+                    });
+                    poly.setMap(map);
+                    __overlays.polygon.push(poly);
+                    return { index: __overlays.polygon.length - 1, count: __overlays.polygon.length };
+                },
+
+                addCircle(center, radius, opts = {}) {
+                    const c = new AMap.Circle({
+                        center: Array.isArray(center) ? center : [center.lng, center.lat],
+                        radius: Number(radius),
+                        strokeColor: opts.color || "#1890ff",
+                        strokeWeight: opts.width || 2,
+                        fillColor: opts.fillColor || "#1890ff",
+                        fillOpacity: opts.fillOpacity ?? 0.15, ...opts,
+                    });
+                    c.setMap(map);
+                    __overlays.circle.push(c);
+                    return { index: __overlays.circle.length - 1, count: __overlays.circle.length };
+                },
+
+                // ===== 信息窗 =====
+
+                openInfoWindow(lnglat, content) {
+                    const ll = Array.isArray(lnglat) ? lnglat : [lnglat.lng, lnglat.lat];
+                    const isHtml = typeof content === "string"
+                        && /<\/?[a-z][\s\S]*>/i.test(content);
+                    const html = isHtml
+                        ? content
+                        : `<div style="padding:8px 12px;font-size:13px;line-height:1.5;max-width:280px;">${escapeHtml(content)}</div>`;
+                    __infoWindow = new AMap.InfoWindow({ content: html, offset: new AMap.Pixel(0, -32), autoMove: true, closeWhenClickMap: true });
+                    __infoWindow.open(map, ll);
+                    return true;
+                },
+
+                closeInfoWindow() {
+                    if (__infoWindow) { __infoWindow.close(); __infoWindow = null; }
+                    return true;
+                },
+
+                // ===== 视图 =====
+
+                fitView(overlays) {
+                    const target = Array.isArray(overlays) && overlays.length
+                        ? overlays
+                        : [...__overlays.polyline, ...__overlays.polygon, ...__overlays.circle];
+                    if (target.length === 0) {
+                        const markers = map.getAllOverlays('marker');
+                        if (markers.length) map.setFitView(markers, false, [60, 60, 60, 60]);
+                        return { fitted: markers.length };
+                    }
+                    map.setFitView(target, false, [60, 60, 60, 60]);
+                    return { fitted: target.length };
+                },
+
+                setCenter(lng, lat) {
+                    map.setCenter([Number(lng), Number(lat)]);
+                    return true;
+                },
+
+                setZoom(zoom) {
+                    map.setZoom(Number(zoom));
+                    return true;
+                },
+
+                zoomIn() {
+                    map.zoomIn();
+                    return true;
+                },
+
+                zoomOut() {
+                    map.zoomOut();
+                    return true;
+                },
+
+                // ===== 覆盖物管理 =====
+
+                clearOverlays(type) {
+                    const t = type || "all";
+                    if (t === "all" || t === "shape") {
+                        __overlays.polyline.forEach((o) => map.remove(o));
+                        __overlays.polygon.forEach((o) => map.remove(o));
+                        __overlays.circle.forEach((o) => map.remove(o));
+                        __overlays.polyline = []; __overlays.polygon = []; __overlays.circle = [];
+                    }
+                    if (t === "all") {
+                        markerLayer.clearOverlays();
+                        if (__infoWindow) { __infoWindow.close(); __infoWindow = null; }
+                    } else if (__overlays[t]) {
+                        __overlays[t].forEach((o) => map.remove(o));
+                        __overlays[t] = [];
+                    }
+                    return { cleared: t };
+                },
+
+                removeOverlay(type, index) {
+                    const arr = __overlays[type];
+                    if (!arr || index < 0 || index >= arr.length) return { removed: false };
+                    map.remove(arr[index]);
+                    arr.splice(index, 1);
+                    return { removed: true, remaining: arr.length };
+                },
+
+                listOverlays() {
+                    return {
+                        polyline: __overlays.polyline.length,
+                        polygon: __overlays.polygon.length,
+                        circle: __overlays.circle.length,
+                        markers: map.getAllOverlays('marker').length,
+                        infoWindowOpen: !!__infoWindow,
+                    };
+                },
+
+                // ===== 搜索 =====
+
+                // 关键词搜索（全城范围）
+                runSearch(keyword) {
+                    return new Promise((resolve, reject) => {
+                        const kw = (keyword || "").trim();
+                        if (!kw) { reject(new Error("搜索关键词不能为空。")); return; }
+                        placeSearch.search(kw, (status, result) => {
+                            if (status !== "complete" || !result || !result.poiList) {
+                                reject(new Error(result && result.info ? result.info : "搜索失败"));
+                                return;
+                            }
+                            const pois = result.poiList.pois || [];
+                            resolve({
+                                count: pois.length,
+                                pois: pois.map((p) => ({
+                                    name: p.name || "",
+                                    type: p.type || "",
+                                    typecode: p.typecode || "",
+                                    address: p.address || "",
+                                    location: [p.location.lng, p.location.lat],
+                                    tel: p.tel || "",
+                                    adcode: p.adcode || "",
+                                })),
+                            });
+                        });
+                    });
+                },
+
+                // 地理编码：地址 → 经纬度
+                geocode(address, city) {
+                    return new Promise((resolve, reject) => {
+                        if (typeof AMap.Geocoder === "undefined") { reject(new Error("AMap.Geocoder plugin not loaded.")); return; }
+                        if (!__geocoder) {
+                            __geocoder = new AMap.Geocoder({ city: city || "全国" });
+                        } else {
+                            __geocoder.setCity(city || "全国");
+                        }
+                        __geocoder.getLocation(address, (status, result) => {
+                            if (status !== "complete" || !result || !result.geocodes || !result.geocodes.length) {
+                                reject(new Error(result && result.info ? result.info : "geocode failed"));
+                                return;
+                            }
+                            const g = result.geocodes[0];
+                            resolve({
+                                lng: g.location.lng, lat: g.location.lat,
+                                formatted_address: g.formatted_address, level: g.level,
+                                all: result.geocodes.map((x) => ({
+                                    lng: x.location.lng, lat: x.location.lat,
+                                    formatted_address: x.formatted_address, level: x.level,
+                                })),
+                            });
+                        });
+                    });
+                },
+
+                // 周边搜索：中心点 + 半径 + 类目（使用 AMap 内置 searchNearBy）
+                searchNearby({ keyword, center, radius, type, city,
+                               exclude_keywords, include_keywords }) {
+                    return new Promise((resolve, reject) => {
+                        if (!center || !Array.isArray(center) || center.length < 2) {
+                            reject(new Error("searchNearby: `center` must be [lng, lat]")); return;
+                        }
+                        const r = Number(radius);
+                        if (!Number.isFinite(r) || r <= 0) {
+                            reject(new Error("searchNearby: `radius` must be a positive number (meters)")); return;
+                        }
+                        const opts = {
+                            pageSize: 25,
+                            pageIndex: 1,
+                            city: city || "全国",
+                            autoFitView: false,
+                        };
+                        if (type) opts.type = String(type);
+                        let ps;
+                        try {
+                            ps = new AMap.PlaceSearch(opts);
+                        } catch (e) {
+                            reject(new Error("searchNearby: AMap.PlaceSearch 构造失败: " + e.message)); return;
+                        }
+                        const kw = (keyword && String(keyword).trim()) || "​";
+                        // 使用 AMap 内置周边搜索 API
+                        ps.searchNearBy(kw, [Number(center[0]), Number(center[1])], r, (status, result) => {
+                            if (status !== "complete" || !result || !result.poiList) {
+                                reject(new Error((result && result.info) ? result.info : "searchNearby: AMap 返回失败")); return;
+                            }
+                            const raw = result.poiList.pois || [];
+
+                            // 解析过滤参数
+                            const excKw = Array.isArray(exclude_keywords)
+                                ? exclude_keywords
+                                : (typeof exclude_keywords === "string" && exclude_keywords.trim()
+                                    ? exclude_keywords.split(/[,，]/).map(s => s.trim()).filter(Boolean) : []);
+                            const incKw = Array.isArray(include_keywords)
+                                ? include_keywords
+                                : (typeof include_keywords === "string" && include_keywords.trim()
+                                    ? include_keywords.split(/[,，]/).map(s => s.trim()).filter(Boolean) : []);
+
+                            // 客户端过滤
+                            const excludedBy = {};
+                            const filtered = raw.filter((p) => {
+                                const name = p.name || "";
+                                if (incKw.length && !incKw.some(k => name.includes(k))) return false;
+                                for (const k of excKw) {
+                                    if (name.includes(k)) {
+                                        excludedBy[k] = (excludedBy[k] || 0) + 1;
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            });
+
+                            // 按距离排序并标准化返回
+                            const pois = filtered
+                                .map((p) => ({
+                                    name: p.name || "",
+                                    type: p.type || "",
+                                    typecode: p.typecode || "",
+                                    address: p.address || "",
+                                    location: [p.location.lng, p.location.lat],
+                                    distance: (typeof p.distance === "number") ? p.distance : null,
+                                    tel: p.tel || "",
+                                    adcode: p.adcode || "",
+                                    citycode: p.citycode || "",
+                                    business: p.business ? {
+                                        open_time: p.business.open_time || "",
+                                        business_area: p.business.business_area || "",
+                                        tag: p.business.tag || "",
+                                    } : null,
+                                    rating: p.rating || null,
+                                    cost: p.cost || null,
+                                    parent: (p.parent && p.parent.name) || null,
+                                    photos: Array.isArray(p.photos)
+                                        ? p.photos.slice(0, 1).map((ph) => (ph && typeof ph === "object") ? (ph.url || "") : (ph || "")).filter(Boolean)
+                                        : [],
+                                }))
+                                .sort((a, b) => {
+                                    const da = (a.distance == null) ? Infinity : a.distance;
+                                    const db = (b.distance == null) ? Infinity : b.distance;
+                                    return da - db;
+                                });
+
+                            resolve({
+                                count: pois.length,
+                                total_before_filter: raw.length,
+                                filtered_out: raw.length - pois.length,
+                                excluded_by_keyword: excludedBy,
+                                pois,
+                            });
+                        });
+                    });
+                },
+
+                // ===== 路线规划（使用 AMap 内置插件） =====
+
+                // 驾车路线：origin [lng, lat], destination [lng, lat]
+                // opts: { waypoints: [[lng, lat], ...] }
+                drivingRoute(origin, destination, opts = {}) {
+                    return new Promise((resolve, reject) => {
+                        if (typeof AMap.Driving === "undefined") { reject(new Error("AMap.Driving plugin not loaded.")); return; }
+                        const driving = new AMap.Driving({
+                            policy: AMap.DrivingPolicy.LEAST_TIME,
+                            autoFitView: false,
+                        });
+                        const o = toLngLatArray([origin])[0];
+                        const d = toLngLatArray([destination])[0];
+                        const waypoints = (opts.waypoints || []).map(wp => toLngLatArray([wp])[0]);
+                        const searchOpts = waypoints.length ? { waypoints } : {};
+                        driving.search(o, d, searchOpts, (status, result) => {
+                            if (status !== "complete" || !result || !result.routes || !result.routes.length) {
+                                reject(new Error((result && result.info) ? result.info : "driving route failed")); return;
+                            }
+                            const route = result.routes[0];
+                            // 提取路线轨迹
+                            const path = route.steps ? route.steps.flatMap(s => s.path || []) : [];
+                            // 绘制路线
+                            const polyline = new AMap.Polyline({
+                                path,
+                                strokeColor: "#1890ff",
+                                strokeWeight: 6,
+                                strokeOpacity: 0.9,
+                                showDir: true,
+                                lineJoin: "round",
+                                lineCap: "round",
+                            });
+                            polyline.setMap(map);
+                            __overlays.polyline.push(polyline);
+                            resolve({
+                                distance_m: route.distance,
+                                duration_s: route.time,
+                                path_points: path.length,
+                                steps: (route.steps || []).map(s => ({
+                                    instruction: s.instruction || "",
+                                    road: s.road || "",
+                                    distance: s.distance,
+                                    time: s.time,
+                                })),
+                            });
+                        });
+                    });
+                },
+
+                // 步行路线
+                walkingRoute(origin, destination) {
+                    return new Promise((resolve, reject) => {
+                        if (typeof AMap.Walking === "undefined") { reject(new Error("AMap.Walking plugin not loaded.")); return; }
+                        const walking = new AMap.Walking({ autoFitView: false });
+                        const o = toLngLatArray([origin])[0];
+                        const d = toLngLatArray([destination])[0];
+                        walking.search(o, d, (status, result) => {
+                            if (status !== "complete" || !result || !result.routes || !result.routes.length) {
+                                reject(new Error((result && result.info) ? result.info : "walking route failed")); return;
+                            }
+                            const route = result.routes[0];
+                            const path = route.steps ? route.steps.flatMap(s => s.path || []) : [];
+                            const polyline = new AMap.Polyline({
+                                path,
+                                strokeColor: "#52c41a",
+                                strokeWeight: 6,
+                                strokeOpacity: 0.9,
+                                showDir: true,
+                                lineJoin: "round",
+                                lineCap: "round",
+                            });
+                            polyline.setMap(map);
+                            __overlays.polyline.push(polyline);
+                            resolve({
+                                distance_m: route.distance,
+                                duration_s: route.time,
+                                path_points: path.length,
+                            });
+                        });
+                    });
+                },
+
+                // 骑行路线
+                ridingRoute(origin, destination) {
+                    return new Promise((resolve, reject) => {
+                        if (typeof AMap.Riding === "undefined") { reject(new Error("AMap.Riding plugin not loaded.")); return; }
+                        const riding = new AMap.Riding({ autoFitView: false });
+                        const o = toLngLatArray([origin])[0];
+                        const d = toLngLatArray([destination])[0];
+                        riding.search(o, d, (status, result) => {
+                            if (status !== "complete" || !result || !result.routes || !result.routes.length) {
+                                reject(new Error((result && result.info) ? result.info : "riding route failed")); return;
+                            }
+                            const route = result.routes[0];
+                            const path = route.steps ? route.steps.flatMap(s => s.path || []) : [];
+                            const polyline = new AMap.Polyline({
+                                path,
+                                strokeColor: "#fa8c16",
+                                strokeWeight: 6,
+                                strokeOpacity: 0.9,
+                                showDir: true,
+                                lineJoin: "round",
+                                lineCap: "round",
+                            });
+                            polyline.setMap(map);
+                            __overlays.polyline.push(polyline);
+                            resolve({
+                                distance_m: route.distance,
+                                duration_s: route.time,
+                                path_points: path.length,
+                            });
+                        });
+                    });
+                },
+
+                // 公交路线
+                transferRoute(origin, destination, city) {
+                    return new Promise((resolve, reject) => {
+                        if (typeof AMap.Transfer === "undefined") { reject(new Error("AMap.Transfer plugin not loaded.")); return; }
+                        const transfer = new AMap.Transfer({
+                            city: city || "全国",
+                            autoFitView: false,
+                            policy: AMap.TransferPolicy.LEAST_TIME,
+                        });
+                        const o = toLngLatArray([origin])[0];
+                        const d = toLngLatArray([destination])[0];
+                        transfer.search(o, d, (status, result) => {
+                            if (status !== "complete" || !result || !result.routes || !result.routes.length) {
+                                reject(new Error((result && result.info) ? result.info : "transfer route failed")); return;
+                            }
+                            const route = result.routes[0];
+                            const path = route.steps ? route.steps.flatMap(s => s.path || []) : [];
+                            const polyline = new AMap.Polyline({
+                                path,
+                                strokeColor: "#fa8c16",
+                                strokeWeight: 6,
+                                strokeOpacity: 0.9,
+                                showDir: true,
+                                lineJoin: "round",
+                                lineCap: "round",
+                            });
+                            polyline.setMap(map);
+                            __overlays.polyline.push(polyline);
+                            resolve({
+                                distance_m: route.distance,
+                                duration_s: route.time,
+                                path_points: path.length,
+                                cost: route.cost,
+                            });
+                        });
+                    });
+                },
+
+                // ===== 行政区查询（使用 AMap 内置插件） =====
+
+                // 查询行政区边界并绘制
+                drawDistrict(name, opts = {}) {
+                    return new Promise((resolve, reject) => {
+                        if (typeof AMap.DistrictSearch === "undefined") { reject(new Error("AMap.DistrictSearch plugin not loaded.")); return; }
+                        const district = new AMap.DistrictSearch({
+                            extensions: "all",
+                            level: opts.level || "district",
+                            subdistrict: 1,
+                        });
+                        district.search(name, (status, result) => {
+                            if (status !== "complete" || !result || !result.districtList || !result.districtList.length) {
+                                reject(new Error((result && result.info) ? result.info : "district search failed")); return;
+                            }
+                            const d = result.districtList[0];
+                            const boundaries = d.boundaries || [];
+                            if (!boundaries.length) { reject(new Error("no boundary data for: " + name)); return; }
+                            const color = opts.color || "#fa8c16";
+                            const fillColor = opts.fillColor || color;
+                            const fillOpacity = opts.fillOpacity ?? 0.2;
+                            const metas = boundaries.map((ring) => {
+                                const poly = new AMap.Polygon({
+                                    path: ring,
+                                    strokeColor: color,
+                                    strokeWeight: opts.strokeWeight || 1,
+                                    fillColor,
+                                    fillOpacity,
+                                });
+                                poly.setMap(map);
+                                __overlays.polygon.push(poly);
+                                return { vertex_count: ring.length };
+                            });
+                            // 中心点
+                            if (d.center) {
+                                addMarker([d.center.lng, d.center.lat], name);
+                            }
+                            resolve({
+                                name: d.name,
+                                adcode: d.adcode,
+                                level: d.level,
+                                polygon_count: metas.length,
+                                vertices: metas,
+                                center: d.center ? { lng: d.center.lng, lat: d.center.lat } : null,
+                            });
+                        });
+                    });
+                },
+
+                // ===== 标注 =====
+
+                // 带信息窗的点击标注
+                addMarkerWithInfo(lnglat, title, infoHtmlOrPoi) {
+                    const ll = Array.isArray(lnglat) ? lnglat : [lnglat.lng, lnglat.lat];
+                    const m = new AMap.Marker({
+                        position: ll, title: title || "",
+                        offset: new AMap.Pixel(-13, -30),
+                        cursor: "pointer",
+                    });
+                    markerLayer.addOverlay(m);
+
+                    let content;
+                    if (typeof infoHtmlOrPoi === "string") {
+                        content = infoHtmlOrPoi;
+                    } else if (infoHtmlOrPoi && typeof infoHtmlOrPoi === "object") {
+                        content = this._formatPoiInfoWindow(infoHtmlOrPoi);
+                    } else {
+                        content = `<div style="padding:8px 12px;font-size:13px;line-height:1.5;max-width:280px;">${escapeHtml(title || "")}</div>`;
+                    }
+
+                    m.on("click", () => {
+                        if (__infoWindow) { try { __infoWindow.close(); } catch (_) {} __infoWindow = null; }
+                        const isHtml = typeof content === "string" && /<\/?[a-z][\s\S]*>/i.test(content);
+                        const html = isHtml
+                            ? content
+                            : `<div style="padding:8px 12px;font-size:13px;line-height:1.5;max-width:280px;">${escapeHtml(content)}</div>`;
+                        __infoWindow = new AMap.InfoWindow({
+                            content: html, offset: new AMap.Pixel(0, -32),
+                            autoMove: true, closeWhenClickMap: true,
+                        });
+                        __infoWindow.open(map, ll);
+                    });
+
+                    return { added: true };
+                },
+
+                _formatPoiInfoWindow(poi) {
+                    const dist = (typeof poi.distance === "number")
+                        ? (poi.distance >= 1000
+                            ? `· 距中心 ${(poi.distance / 1000).toFixed(1)} km`
+                            : `· 距中心 ${poi.distance} m`)
+                        : "";
+                    const photoHtml = (Array.isArray(poi.photos) && poi.photos.length)
+                        ? `<img src="${escapeHtml(poi.photos[0])}" style="width:100%;max-height:120px;object-fit:cover;border-radius:4px;margin-bottom:6px;" onerror="this.style.display='none'" />`
+                        : "";
+                    const biz = poi.business || {};
+                    return `<div style="padding:8px 12px;font-size:13px;line-height:1.6;max-width:280px;">
+                        ${photoHtml}
+                        <div style="font-size:14px;font-weight:bold;color:#1a1a2e;margin-bottom:4px;">${escapeHtml(poi.name || "")}</div>
+                        <div style="color:#888;font-size:12px;margin-bottom:6px;">${escapeHtml(poi.type || "")} ${dist}</div>
+                        <div style="border-top:1px solid #eee;padding-top:6px;color:#444;">
+                            📍 ${escapeHtml(poi.address || "—")}<br/>
+                            📞 ${escapeHtml(poi.tel || "—")}<br/>
+                            ${biz.open_time ? `🕒 ${escapeHtml(biz.open_time)}<br/>` : ""}
+                            ${poi.rating ? `⭐ 评分 ${escapeHtml(String(poi.rating))}<br/>` : ""}
+                            ${poi.cost ? `💰 人均 ${escapeHtml(String(poi.cost))}<br/>` : ""}
+                        </div>
+                    </div>`;
+                },
+
+                // ===== 几何计算（使用 AMap.GeometryUtil） =====
+
+                distance(p1, p2) {
+                    if (typeof AMap.GeometryUtil === "undefined") {
+                        return { error: "AMap.GeometryUtil not loaded" };
+                    }
+                    const a = toLngLatArray([p1])[0];
+                    const b = toLngLatArray([p2])[0];
+                    const meters = AMap.GeometryUtil.distance(a, b);
+                    return { meters, km: (meters / 1000).toFixed(2) };
+                },
+
+                // ===== 定位 =====
+
+                locate() {
+                    return new Promise((resolve, reject) => {
+                        if (!geolocation) { reject(new Error("Geolocation plugin not loaded.")); return; }
+                        geolocation.getCurrentPosition((status, result) => {
+                            if (status === "complete") {
+                                const { lng, lat } = result.position;
+                                addMarker([lng, lat], "我的位置");
+                                resolve({
+                                    lng, lat,
+                                    formatted_address: result.formattedAddress || "",
+                                    address_component: result.addressComponent || {},
+                                });
+                            } else {
+                                reject(new Error((result && result.info) ? result.info : "定位失败"));
+                            }
+                        });
+                    });
+                },
+
+                getState() {
+                    const center = map.getCenter();
+                    const zoom = map.getZoom();
+                    const bounds = map.getBounds();
+                    return {
+                        center: { lng: center.lng, lat: center.lat },
+                        zoom,
+                        bounds: bounds
+                            ? {
+                                sw: { lng: bounds.southwest.lng, lat: bounds.southwest.lat },
+                                ne: { lng: bounds.northeast.lng, lat: bounds.northeast.lat },
+                            }
+                            : null,
+                    };
+                },
+            };
+
+            window.__map = { map, placeSearch, geolocation, addMarker, ...__helpers };
+        })();
+    </script>
+
+    <!-- BrowserUseClient: connects through the FastAPI WS proxy at /ws/browser.
+         The ?v= query string is filled from the JS file's mtime in pages.py,
+         so the browser fetches a fresh copy whenever the file changes —
+         no manual hard-refresh needed. -->
+    <script src="/static/vendor/BrowserUseClient.js?v={{ js_version }}"></script>
+    <script>
+        (function () {
+            "use strict";
+            const cfg = window.__CHAT_MAP_CONFIG__;
+            if (!cfg || !cfg.browserUseWs) {
+                console.error("[map.html] missing __CHAT_MAP_CONFIG__");
+                return;
+            }
+            // Prefer the user_token the chat panel wrote to
+            // localStorage (same origin, so we can read parent).
+            // Fall back to the server-rendered value when the user
+            // opened /map directly (no chat panel parent).
+            let token = null;
+            try { token = parent.localStorage.getItem("chat_map_user_token"); }
+            catch (e) { /* cross-origin parent, ignore */ }
+            if (!token) token = cfg.userToken;
+
+            console.log("[map.html] BrowserUseClient →", cfg.browserUseWs, "token-source:", token === cfg.userToken ? "server" : "localStorage");
+            const client = new BrowserUseClient(cfg.browserUseWs, token || null);
+            client.addEventListener("connect", () => console.log("[map.html] BrowserUseClient connected"));
+            client.addEventListener("disconnect", () => console.log("[map.html] BrowserUseClient disconnected"));
+            client.connect().catch((e) => console.error("[map.html] BrowserUseClient connect failed:", e));
+            window.__browserUseClient = client;
+        })();
+    </script>
+</body>
+</html>

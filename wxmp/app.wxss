@@ -1,0 +1,87 @@
+/* app.wxss — global styles (used in every page) */
+
+page {
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  font-size: 28rpx;
+}
+
+view, text, scroll-view, button {
+  box-sizing: border-box;
+}
+
+/* Reusable bubble / dot classes. Specific to the chat panel — see
+   pages/index/index.wxss for layout. */
+
+.bubble {
+  padding: 16rpx 22rpx;
+  border-radius: 16rpx;
+  max-width: 80%;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.msg-user .bubble {
+  background: #1677ff;
+  color: #fff;
+  margin-left: auto;
+}
+
+.msg-assistant .bubble {
+  background: #1e293b;
+  color: #e2e8f0;
+}
+
+.thinking {
+  background: rgba(255, 255, 255, 0.04);
+  border-left: 4rpx solid #94a3b8;
+  padding: 12rpx 16rpx;
+  font-size: 24rpx;
+  color: #94a3b8;
+  white-space: pre-wrap;
+  margin: 8rpx 0;
+  max-width: 90%;
+}
+
+.dot {
+  display: inline-block;
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 50%;
+  margin-right: 8rpx;
+  vertical-align: middle;
+}
+.dot-on  { background: #22c55e; }
+.dot-off { background: #ef4444; }
+.dot-error{ background: #f59e0b; }
+
+.tool-card {
+  background: #1e293b;
+  border-radius: 12rpx;
+  margin: 8rpx 0;
+  overflow: hidden;
+  font-size: 24rpx;
+}
+.tool-header {
+  display: flex;
+  align-items: center;
+  padding: 14rpx 16rpx;
+  gap: 8rpx;
+}
+.tool-name { color: #93c5fd; font-weight: 600; }
+.tool-state { margin-left: auto; }
+.tool-body { padding: 0 16rpx 14rpx; color: #cbd5e1; }
+.tool-args, .tool-result {
+  white-space: pre-wrap;
+  font-family: "Menlo", "Consolas", monospace;
+  font-size: 22rpx;
+  background: rgba(0,0,0,0.25);
+  padding: 10rpx;
+  border-radius: 6rpx;
+  margin-top: 6rpx;
+}
+.tool-state-success .tool-state { color: #22c55e; }
+.tool-state-failed  .tool-state { color: #ef4444; }
+.tool-state-cancelled .tool-state { color: #94a3b8; }
